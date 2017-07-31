@@ -1,7 +1,11 @@
 require "sinatra"
-require "sinatra/reloader" if development?
+require "sinatra/reloader"
 require "tilt/erubis"
 require "sinatra/content_for"
+
+configure do
+  set :erb, :escape_html => true
+end
 
 configure do
   enable :sessions
@@ -13,11 +17,12 @@ end
 
 before do
   session[:lists] ||= []
+  session[:ids] ||= []
 end
 
 # View all lists
 get "/lists" do
-  @lists = session[:lists]
+  @lists = session[:lists].sort_by {|lst| complete?(lst) ? 1 : 0}
 
 
   erb :lists, layout: :layout
@@ -32,16 +37,38 @@ get "/lists/new" do
   erb :new_list, layout: :layout
 end
 
-get "/lists/:number" do
-  @list = session[:lists][params[:number].to_i]
+def check name
+  unless session[:ids].include?(name)
+    session[:error] = "That list isn't #{name}."
+    redirect "/lists"
+  end
+end
+
+def find_list name
+  session[:lists].each do |list|
+    return list if list[:id] == name
+  end
+end
+
+get "/lists/:id" do
+
+  check params[:id]
+
+  @list = find_list params[:id]
   @name = @list[:name]
   @todos = @list[:todos]
 
   erb :single_list, layout: :layout
 end
 
-get "/lists/:number/edit" do
-  @current_name = session[:lists][params[:number].to_i][:name]
+get "/lists/:id/edit" do
+  check params[:id]
+
+  @list = find_list params[:id]
+
+  @id = params[:id]
+
+  @current_name = @list[:name]
   erb :edit, layout: :layout
 end
 
@@ -55,12 +82,19 @@ def error_occured(name)
   end
 end
 
-def todo_error(name, id)
+def todo_error(name, list)
   if !(1..100).cover?(name.length)
     "You are terrible, choose a name that isn't dumb."
-  elsif session[:lists][id][:todos].any? { |pair| pair[:name] == name }
+  elsif @list[:todos].any? { |pair| pair[:name] == name }
     "That name is already taken. Choose another."
   end
+end
+
+def new_id
+  id = (("A".."Z").to_a.sample(3) + (0..9).to_a.sample(3)).join
+  return new_id if session[:ids].include?(id)
+  session[:ids] << id
+  id
 end
 
 # actually creates a new list in the session
@@ -72,82 +106,131 @@ post "/lists" do
     session[:error] = error
     erb :new_list, layout: :layout
   else
-    session[:lists] << { name: name, todos: [], finished: 0 }
+    id = new_id
+    session[:lists] << { name: name, todos: [], finished: 0, id: id }
     session[:success] = "You made a list. Whoop de doo."
     redirect "/lists"
   end
 end
 
-post "/lists/:number" do
+post "/lists/:id" do
+
+  check params[:id]
+
+  @list = find_list params[:id]
+
+
   name = params[:list_name].strip
   error = error_occured(name)
-  @current_name = session[:lists][params[:number].to_i][:name]
+  @current_name = @list[:name]
   if error
     session[:error] = error
 
     erb :edit, layout: :layout
   else
-    session[:lists][params[:number].to_i][:name] = name
+    @list[:name] = name
     session[:success] = "You changed the list's name."
-    redirect "/lists/#{params[:number]}"
+    redirect "/lists/#{params[:id]}"
   end
 end
 
 # delete a list
-post "/lists/:number/delete" do
-  session[:lists].delete_at(params[:number].to_i)
-  session[:success] = "Successfully deleted"
-  redirect "/lists"
+post "/lists/:id/delete" do
+
+  check params[:id]
+
+  @list = find_list params[:id]
+
+  @id = params[:id]
+
+
+  session[:lists].delete(@list)
+  session[:ids].delete(params[:id])
+  if env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
+    "/lists"
+  else
+    session[:success] = "Successfully deleted"
+    redirect "/lists"
+  end
 end
 
 # create a new todo
-post "/lists/:number/todos" do
-  error = todo_error(params[:todo].strip, params[:number].to_i)
-  @todos = session[:lists][params[:number].to_i][:todos]
+post "/lists/:id/todos" do
+  check params[:id]
+
+  @list = find_list params[:id]
+
+  @id = params[:id]
+
+  error = todo_error(params[:todo].strip, @list)
+  @todos = @list[:todos]
   if error
     session[:error] = error
-    @name = session[:lists][params[:number].to_i][:name]
-    redirect "/lists/#{params[:number]}"
+    @name = @list[:name]
+    redirect "/lists/#{@id}"
   else
     @todos << {name: params[:todo], completed: false}
     session[:success] = "Todo Added"
-    redirect "/lists/#{params[:number]}"
+    redirect "/lists/#{@id}"
   end
 end
 
 #delete a todo
-post "/lists/:number/:name/delete" do
-  list = session[:lists][params[:number].to_i][:todos]
-  list.delete_if {|hash| params[:name] == hash[:name] }
-  session[:success] = "Todo deleted"
-  redirect "/lists/#{params[:number]}"
+post "/lists/:id/:name/delete" do
+  check params[:id]
+
+  @list = find_list params[:id]
+
+  @id = params[:id]
+
+  todos = @list[:todos]
+  todos.delete_if {|hash| params[:name] == hash[:name] }
+  if env["HTTP_X_REQUESTED_WITH"] == "XMLHttpRequest"
+    status 204
+  else
+    session[:success] = "Todo deleted"
+    redirect "/lists/#{params[:id]}"
+  end
 end
 
 #toggle a todo
-post "/lists/:number/:name/toggle" do
-  list = session[:lists][params[:number].to_i][:todos]
-  list.each do |hash|
+post "/lists/:id/:name/toggle" do
+  check params[:id]
+
+  @list = find_list params[:id]
+
+  @id = params[:id]
+
+
+  todos = @list[:todos]
+  todos.each do |hash|
     if hash[:name] == params[:name]
       value = eval(params[:completed])
       hash[:completed] = value
       if value
-        session[:lists][params[:number].to_i][:finished] += 1
+        @list[:finished] += 1
       else
-        session[:lists][params[:number].to_i][:finished] -= 1
+        @list[:finished] -= 1
       end
     end
   end
-  redirect "/lists/#{params[:number]}"
+  redirect "/lists/#{params[:id]}"
 end
 
 # mark all todoes as done
-post "/lists/:number/check-all" do
-  list = session[:lists][params[:number].to_i][:todos]
-  list.each do |hash|
+post "/lists/:id/check-all" do
+  check params[:id]
+
+  @list = find_list params[:id]
+
+  @id = params[:id]
+
+  todos = @list[:todos]
+  todos.each do |hash|
     hash[:completed] = true
   end
-  session[:lists][params[:number].to_i][:finished] = list.length
-  redirect "/lists/#{params[:number]}"
+  @list[:finished] = todos.length
+  redirect "/lists/#{params[:id]}"
 end
 
 # -----------------------------------HELPERS --------------------------------#
@@ -158,11 +241,7 @@ helpers do
   end
 
   def list_class list
-    if complete?(list)
-      "complete"
-    else
-      nil
-    end
+    complete?(list) ? "complete" : ""
   end
 
   def sort_lists list
@@ -171,15 +250,16 @@ helpers do
       ind = list.index(entry)
       yield(entry, ind)
     end
-
   end
 
   def sort_todos todos
     todos = todos.sort_by{ |item| item[:completed] ? 1 : 0 }
-
     todos.each_with_index do |i, ind|
       yield i, ind
     end
+  end
 
+  def h(content)
+    Rack::Utils.escape_html(content)
   end
 end
